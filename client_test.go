@@ -647,7 +647,7 @@ func TestClient_Close(t *testing.T) {
 		mustClose(t, connL)
 	})
 	t.Run("Real", func(t *testing.T) {
-		conn, err := net.Dial("udp", "localhost:0")
+		conn, err := net.Dial("udp4", "localhost:3478")
 		if err != nil {
 			t.Fatal(err)
 		}

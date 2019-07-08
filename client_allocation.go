@@ -14,26 +14,21 @@ import (
 
 // Allocation reflects TURN Allocation.
 type Allocation struct {
-	log       logging.LeveledLogger
-	client    *Client
-	relayed   turn.RelayedAddress
-	reflexive stun.XORMappedAddress
-	perms     []*Permission // protected with client.mux
-	minBound  turn.ChannelNumber
-	integrity stun.MessageIntegrity
-	nonce     stun.Nonce
+	log        logging.LeveledLogger
+	client     *Client
+	relayed    turn.RelayedAddress
+	reflexive  stun.XORMappedAddress
+	channelMap map[string]*Channel             // protected with client.mux
+	bindingMap map[turn.ChannelNumber]*Channel // protected with client.mux
+	minBound   turn.ChannelNumber
+	integrity  stun.MessageIntegrity
+	nonce      stun.Nonce
 }
 
-func (a *Allocation) removePermission(p *Permission) {
+func (a *Allocation) removeChannel(ch *Channel) {
 	a.client.mux.Lock()
-	newPerms := make([]*Permission, 0, len(a.perms))
-	for _, permission := range a.perms {
-		if p == permission {
-			continue
-		}
-		newPerms = append(newPerms, permission)
-	}
-	a.perms = newPerms
+	delete(a.channelMap, peerAddr2String(ch.peerAddr))
+	delete(a.bindingMap, ch.number)
 	a.client.mux.Unlock()
 }
 
@@ -62,13 +57,15 @@ func (c *Client) allocate(req, res *stun.Message) (*Allocation, error) {
 			return nil, err
 		}
 		a := &Allocation{
-			client:    c,
-			log:       c.log,
-			reflexive: reflexive,
-			relayed:   relayed,
-			minBound:  turn.MinChannelNumber,
-			integrity: c.integrity,
-			nonce:     nonce,
+			client:     c,
+			log:        c.log,
+			reflexive:  reflexive,
+			relayed:    relayed,
+			channelMap: map[string]*Channel{},
+			bindingMap: map[turn.ChannelNumber]*Channel{},
+			minBound:   turn.MinChannelNumber,
+			integrity:  c.integrity,
+			nonce:      nonce,
 		}
 		c.alloc = a
 		return a, nil
@@ -133,8 +130,12 @@ func (c *Client) Allocate() (*Allocation, error) {
 	return c.allocate(req, res)
 }
 
+func peerAddr2String(peer turn.PeerAddress) string {
+	return fmt.Sprintf("%s:%d", peer.IP.String(), peer.Port)
+}
+
 // Create creates new permission to peer.
-func (a *Allocation) Create(peer net.Addr) (*Permission, error) {
+func (a *Allocation) Create(peer net.Addr) (*Channel, error) {
 	switch addr := peer.(type) {
 	case *net.UDPAddr:
 		return a.CreateUDP(addr)
@@ -184,8 +185,8 @@ func (a *Allocation) Relayed() turn.RelayedAddress {
 	return a.relayed
 }
 
-// CreateUDP creates new UDP Permission to peer with provided addr.
-func (a *Allocation) CreateUDP(addr *net.UDPAddr) (*Permission, error) {
+// CreateUDP creates new UDP Channel to peer with provided addr.
+func (a *Allocation) CreateUDP(addr *net.UDPAddr) (*Channel, error) {
 	peer := turn.PeerAddress{
 		IP:   addr.IP,
 		Port: addr.Port,
@@ -193,17 +194,17 @@ func (a *Allocation) CreateUDP(addr *net.UDPAddr) (*Permission, error) {
 	if err := a.allocate(peer); err != nil {
 		return nil, err
 	}
-	p := &Permission{
+	ch := &Channel{
 		log:         a.log,
 		peerAddr:    peer,
 		client:      a.client,
 		refreshRate: a.client.refreshRate,
 	}
-	p.ctx, p.cancel = context.WithCancel(context.Background())
-	p.startRefreshLoop()
-	p.peerL, p.peerR = net.Pipe()
+	ch.ctx, ch.cancel = context.WithCancel(context.Background())
+	ch.startRefreshLoop()
+	ch.peerL, ch.peerR = net.Pipe()
 	a.client.mux.Lock()
-	a.perms = append(a.perms, p)
+	a.channelMap[peerAddr2String(ch.peerAddr)] = ch
 	a.client.mux.Unlock()
-	return p, nil
+	return ch, nil
 }

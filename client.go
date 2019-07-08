@@ -145,13 +145,13 @@ func (c *Client) stunHandler(e stun.Event) {
 		return
 	}
 	c.mux.RLock()
-	for i := range c.alloc.perms {
-		if !turn.Addr(c.alloc.perms[i].peerAddr).Equal(turn.Addr(addr)) {
-			continue
-		}
-		if _, err := c.alloc.perms[i].peerL.Write(data); err != nil {
+	c.log.Debugf("handle STUN event from %s", peerAddr2String(addr))
+	if ch, ok := c.alloc.channelMap[peerAddr2String(addr)]; ok {
+		if _, err := ch.peerL.Write(data); err != nil {
 			c.log.Errorf("failed to write: %v", err)
 		}
+	} else {
+		c.log.Debugf("could not find corresponding channel for STUN message from %s", peerAddr2String(addr))
 	}
 	c.mux.RUnlock()
 }
@@ -159,11 +159,8 @@ func (c *Client) stunHandler(e stun.Event) {
 func (c *Client) handleChannelData(data *turn.ChannelData) {
 	c.log.Debugf("handleChannelData: 0x%x", int(data.Number))
 	c.mux.RLock()
-	for i := range c.alloc.perms {
-		if data.Number != c.alloc.perms[i].Binding() {
-			continue
-		}
-		if _, err := c.alloc.perms[i].peerL.Write(data.Data); err != nil {
+	if ch, ok := c.alloc.bindingMap[data.Number]; ok {
+		if _, err := ch.peerL.Write(data.Data); err != nil {
 			c.log.Errorf("failed to write: %v", err)
 		}
 	}
@@ -182,6 +179,9 @@ func (c *Client) readUntilClosed() {
 			c.log.Info("connection closed")
 			break
 		}
+
+		c.log.Debugf("received %d bytes", n)
+
 		data := buf[:n]
 		if !turn.IsChannelData(data) {
 			continue
@@ -240,6 +240,7 @@ func (c *Client) do(req, res *stun.Message) error {
 	return stunErr
 }
 
+// Close closes TURN client
 func (c *Client) Close() error {
 	if !c.conClose {
 		// TODO(ernado): Cleanup all resources.

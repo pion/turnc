@@ -15,8 +15,8 @@ import (
 	"github.com/pion/stun"
 )
 
-// Permission implements net.PacketConn.
-type Permission struct {
+// Channel implements net.PacketConn.
+type Channel struct {
 	log          logging.LeveledLogger
 	mux          sync.RWMutex
 	number       turn.ChannelNumber
@@ -30,22 +30,22 @@ type Permission struct {
 }
 
 // Read data from peer.
-func (p *Permission) Read(b []byte) (n int, err error) {
-	return p.peerR.Read(b)
+func (ch *Channel) Read(b []byte) (n int, err error) {
+	return ch.peerR.Read(b)
 }
 
 // Bound returns true if channel number is bound for current permission.
-func (p *Permission) Bound() bool {
-	p.mux.RLock()
-	defer p.mux.RUnlock()
-	return p.number.Valid()
+func (ch *Channel) Bound() bool {
+	ch.mux.RLock()
+	defer ch.mux.RUnlock()
+	return ch.number.Valid()
 }
 
 // Binding returns current channel number or 0 if not bound.
-func (p *Permission) Binding() turn.ChannelNumber {
-	p.mux.RLock()
-	defer p.mux.RUnlock()
-	return p.number
+func (ch *Channel) Binding() turn.ChannelNumber {
+	ch.mux.RLock()
+	defer ch.mux.RUnlock()
+	return ch.number
 }
 
 var (
@@ -55,62 +55,62 @@ var (
 	ErrNotBound = errors.New("channel is not bound")
 )
 
-func (p *Permission) refresh() error {
-	return p.client.alloc.allocate(p.peerAddr)
+func (ch *Channel) refresh() error {
+	return ch.client.alloc.allocate(ch.peerAddr)
 }
 
-func (p *Permission) startLoop(f func()) {
-	if p.refreshRate == 0 {
+func (ch *Channel) startLoop(f func()) {
+	if ch.refreshRate == 0 {
 		return
 	}
-	p.wg.Add(1)
+	ch.wg.Add(1)
 	go func() {
-		ticker := time.NewTicker(p.refreshRate)
-		defer p.wg.Done()
+		ticker := time.NewTicker(ch.refreshRate)
+		defer ch.wg.Done()
 		for {
 			select {
 			case <-ticker.C:
 				f()
-			case <-p.ctx.Done():
+			case <-ch.ctx.Done():
 				return
 			}
 		}
 	}()
 }
 
-func (p *Permission) startRefreshLoop() {
-	p.startLoop(func() {
-		if err := p.refresh(); err != nil {
-			p.log.Errorf("failed to refresh permission: %v", err)
+func (ch *Channel) startRefreshLoop() {
+	ch.startLoop(func() {
+		if err := ch.refresh(); err != nil {
+			ch.log.Errorf("failed to refresh permission: %v", err)
 		}
-		p.log.Debug("permission refreshed")
+		ch.log.Debug("permission refreshed")
 	})
 }
 
 // refreshBind performs rebinding of a channel.
-func (p *Permission) refreshBind() error {
-	p.mux.Lock()
-	defer p.mux.Unlock()
-	if p.number == 0 {
+func (ch *Channel) refreshBind() error {
+	ch.mux.Lock()
+	defer ch.mux.Unlock()
+	if ch.number == 0 {
 		return ErrNotBound
 	}
-	if err := p.bind(p.number); err != nil {
+	if err := ch.bind(ch.number); err != nil {
 		return err
 	}
-	p.log.Debug("binding refreshed")
+	ch.log.Debug("binding refreshed")
 	return nil
 }
 
-func (p *Permission) bind(n turn.ChannelNumber) error {
+func (ch *Channel) bind(n turn.ChannelNumber) error {
 	// Starting transaction.
-	a := p.client.alloc
+	a := ch.client.alloc
 	res := stun.New()
 	req := stun.New()
 	req.TransactionID = stun.NewTransactionID()
 	req.Type = stun.NewType(stun.MethodChannelBind, stun.ClassRequest)
 	req.WriteHeader()
 	setters := make([]stun.Setter, 0, 10)
-	setters = append(setters, &p.peerAddr, n)
+	setters = append(setters, &ch.peerAddr, n)
 	if len(a.integrity) > 0 {
 		// Applying auth.
 		setters = append(setters,
@@ -123,7 +123,7 @@ func (p *Permission) bind(n turn.ChannelNumber) error {
 			return setErr
 		}
 	}
-	if doErr := p.client.do(req, res); doErr != nil {
+	if doErr := ch.client.do(req, res); doErr != nil {
 		return doErr
 	}
 	if res.Type != stun.NewType(stun.MethodChannelBind, stun.ClassSuccessResponse) {
@@ -135,22 +135,27 @@ func (p *Permission) bind(n turn.ChannelNumber) error {
 
 // Bind performs binding transaction, allocating channel binding for
 // the permission.
-func (p *Permission) Bind() error {
-	p.mux.Lock()
-	defer p.mux.Unlock()
-	if p.number != 0 {
+func (ch *Channel) Bind() error {
+	ch.mux.Lock()
+	defer ch.mux.Unlock()
+	if ch.number != 0 {
 		return ErrAlreadyBound
 	}
-	a := p.client.alloc
+	a := ch.client.alloc
 	a.minBound++
 	n := a.minBound
-	if err := p.bind(n); err != nil {
+	if err := ch.bind(n); err != nil {
 		return err
 	}
-	p.number = n
-	p.startLoop(func() {
-		if err := p.refreshBind(); err != nil {
-			p.log.Errorf("failed to refresh bind: %v", err)
+	ch.number = n
+
+	a.client.mux.Lock()
+	a.bindingMap[ch.number] = ch
+	a.client.mux.Unlock()
+
+	ch.startLoop(func() {
+		if err := ch.refreshBind(); err != nil {
+			ch.log.Errorf("failed to refresh bind: %v", err)
 		}
 	})
 	return nil
@@ -159,46 +164,46 @@ func (p *Permission) Bind() error {
 // Write sends buffer to peer.
 //
 // If permission is bound, the ChannelData message will be used.
-func (p *Permission) Write(b []byte) (n int, err error) {
-	if n := p.Binding(); n.Valid() {
-		p.log.Debug("using channel data to write")
-		return p.client.sendChan(b, n)
+func (ch *Channel) Write(b []byte) (n int, err error) {
+	if n := ch.Binding(); n.Valid() {
+		ch.log.Debug("using channel data to write")
+		return ch.client.sendChan(b, n)
 	}
-	p.log.Debug("using STUN to write")
-	return p.client.sendData(b, &p.peerAddr)
+	ch.log.Debug("using STUN to write")
+	return ch.client.sendData(b, &ch.peerAddr)
 }
 
 // Close stops all refreshing loops for permission and removes it from
 // allocation.
-func (p *Permission) Close() error {
-	cErr := p.peerR.Close()
-	p.mux.Lock()
-	cancel := p.cancel
-	p.mux.Unlock()
+func (ch *Channel) Close() error {
+	cErr := ch.peerR.Close()
+	ch.mux.Lock()
+	cancel := ch.cancel
+	ch.mux.Unlock()
 	cancel()
-	p.wg.Wait()
-	p.client.alloc.removePermission(p)
+	ch.wg.Wait()
+	ch.client.alloc.removeChannel(ch)
 	return cErr
 }
 
 // LocalAddr is relayed address from TURN server.
-func (p *Permission) LocalAddr() net.Addr {
-	return turn.Addr(p.client.alloc.relayed)
+func (ch *Channel) LocalAddr() net.Addr {
+	return turn.Addr(ch.client.alloc.relayed)
 }
 
 // RemoteAddr is peer address.
-func (p *Permission) RemoteAddr() net.Addr {
-	return turn.Addr(p.peerAddr)
+func (ch *Channel) RemoteAddr() net.Addr {
+	return turn.Addr(ch.peerAddr)
 }
 
 // SetDeadline implements net.Conn.
-func (p *Permission) SetDeadline(t time.Time) error {
-	return p.peerR.SetDeadline(t)
+func (ch *Channel) SetDeadline(t time.Time) error {
+	return ch.peerR.SetDeadline(t)
 }
 
 // SetReadDeadline implements net.Conn.
-func (p *Permission) SetReadDeadline(t time.Time) error {
-	return p.peerR.SetReadDeadline(t)
+func (ch *Channel) SetReadDeadline(t time.Time) error {
+	return ch.peerR.SetReadDeadline(t)
 }
 
 // ErrNotImplemented means that functionality is not currently implemented,
@@ -206,6 +211,6 @@ func (p *Permission) SetReadDeadline(t time.Time) error {
 var ErrNotImplemented = errors.New("functionality not implemented")
 
 // SetWriteDeadline implements net.Conn.
-func (p *Permission) SetWriteDeadline(t time.Time) error {
+func (ch *Channel) SetWriteDeadline(t time.Time) error {
 	return ErrNotImplemented
 }

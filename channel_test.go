@@ -15,9 +15,9 @@ import (
 	"github.com/pion/turnc/internal/testutil"
 )
 
-func TestPermission(t *testing.T) {
+func TestChannel(t *testing.T) {
 	t.Run("Refresh", func(t *testing.T) {
-		t.Run("Permission", func(t *testing.T) {
+		t.Run("Channel", func(t *testing.T) {
 			t.Run("Ok", func(t *testing.T) {
 				logs := &testutil.Observer{}
 				connL, connR := net.Pipe()
